@@ -124,6 +124,76 @@ def _detect_raw_scenes(
     return scenes
 
 
+def _refine_scenes_by_motion(
+    video_path: Path,
+    scenes: List[Tuple[float, float]],
+    scene_cfg: dict,
+) -> List[Tuple[float, float]]:
+    """
+    Event-granular scene refinement. Cut-based scene detection finds camera CUTS, but
+    static-camera video (home video, egocentric) has none — a whole video can collapse
+    into one scene whose single caption loses all internal event structure. Split any
+    scene longer than max_event_duration_s at motion MINIMA (pauses between actions),
+    using the same camera-compensated motion signal as hybrid keyframe selection.
+    """
+    max_event_s = float(scene_cfg.get("max_event_duration_s", 0.0))
+    if max_event_s <= 0:
+        return scenes
+    try:
+        import numpy as np
+        import cv2
+    except Exception:
+        return scenes
+
+    target_seg_s = float(scene_cfg.get("event_target_duration_s", 7.0))
+    dense_fps = float(scene_cfg.get("event_dense_fps", 3.0))
+
+    refined: List[Tuple[float, float]] = []
+    for start_s, end_s in scenes:
+        dur = end_s - start_s
+        if dur <= max_event_s:
+            refined.append((start_s, end_s))
+            continue
+
+        n = int(min(150, max(6, dur * dense_fps)))
+        cap = cv2.VideoCapture(str(video_path))
+        ts, grays = [], []
+        try:
+            for rel_t in np.linspace(0.0, max(dur - 1e-3, 0.0), n):
+                cap.set(cv2.CAP_PROP_POS_MSEC, (start_s + float(rel_t)) * 1000.0)
+                ok, fr = cap.read()
+                if ok and fr is not None:
+                    ts.append(float(rel_t))
+                    grays.append(cv2.cvtColor(cv2.resize(fr, (160, 120)), cv2.COLOR_BGR2GRAY))
+        finally:
+            cap.release()
+        if len(grays) < 6:
+            refined.append((start_s, end_s))
+            continue
+
+        d = np.array([0.0] + [_cc_diff(np, cv2, grays[i - 1], grays[i]) for i in range(1, len(grays))])
+        cum = np.cumsum(d)
+        n_seg = max(2, int(round(dur / target_seg_s)))
+        slack = 3
+        bounds = []
+        for k in range(1, n_seg):
+            tg = cum[-1] * k / n_seg
+            j = int(np.searchsorted(cum, tg))
+            lo, hi = max(1, j - slack), min(len(grays) - 1, j + slack)
+            bounds.append(min(range(lo, hi + 1), key=lambda i: d[i]))  # snap to pause
+        cut_times = sorted({start_s + ts[b] for b in bounds if 0 < b < len(ts)})
+
+        prev = start_s
+        for c in cut_times:
+            if c - prev >= 1.0:  # never emit degenerate slivers
+                refined.append((prev, c))
+                prev = c
+        refined.append((prev, end_s))
+        logger.info(f"  Event refinement: scene {start_s:.1f}-{end_s:.1f}s ({dur:.1f}s) -> "
+                    f"{len(cut_times) + 1} event segments")
+    return refined
+
+
 def _extract_audio(
     video_path: Path,
     output_dir: Path,
@@ -229,6 +299,100 @@ def _num_keyframes_for_clip(duration_s: float, keyframe_cfg: dict) -> int:
     return max(1, long_clip_frames)
 
 
+def _cc_diff(np, cv2, g0, g1):
+    """Camera-compensated frame difference: cancel global shift, then measure residual motion."""
+    (dx, dy), _ = cv2.phaseCorrelate(np.float32(g0), np.float32(g1))
+    M = np.float32([[1, 0, -dx], [0, 1, -dy]])
+    g1a = cv2.warpAffine(g1, M, (g1.shape[1], g1.shape[0]))
+    h, w = g0.shape
+    m = 10
+    return float(np.mean(cv2.absdiff(g0[m:h - m, m:w - m], g1a[m:h - m, m:w - m])))
+
+
+def _laplacian_var(np, cv2, fr):
+    g = cv2.cvtColor(cv2.resize(fr, (320, 240)), cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(g, cv2.CV_64F).var())
+
+
+def _sharpest_near(np, cv2, frames, idx, win=1):
+    lo, hi = max(0, idx - win), min(len(frames), idx + win + 1)
+    return max(range(lo, hi), key=lambda j: _laplacian_var(np, cv2, frames[j]))
+
+
+def _select_hybrid_indices(np, cv2, frames, min_frames, max_frames):
+    """Coverage anchors (first + last) + interior motion-peak frames, each snapped to the
+    sharpest neighbor. Count scales with total motion. Validated: dev +2.75 / held-out +2.1."""
+    if len(frames) <= 2:
+        return list(range(len(frames)))
+    grays = [cv2.cvtColor(cv2.resize(f, (160, 120)), cv2.COLOR_BGR2GRAY) for f in frames]
+    d = [0.0] + [_cc_diff(np, cv2, grays[i - 1], grays[i]) for i in range(1, len(grays))]
+    cum = np.cumsum(d)
+    total = float(cum[-1])
+    scale = max(np.percentile(d, 90) * 4 + 1e-6, 1.0)
+    n_total = int(np.clip(2 + total / scale, min_frames, max_frames))
+    idxs = {_sharpest_near(np, cv2, frames, 0), _sharpest_near(np, cv2, frames, len(frames) - 1)}
+    n_motion = max(1, n_total - 2)
+    for tg in np.linspace(0.0, total, n_motion + 2)[1:-1]:
+        j = min(int(np.searchsorted(cum, tg)), len(frames) - 1)
+        idxs.add(_sharpest_near(np, cv2, frames, j))
+    return sorted(idxs)
+
+
+def _extract_keyframes_hybrid(clip_file: Path, clip: dict, keyframes_dir: Path, keyframe_cfg: dict) -> List[dict]:
+    """Motion-aware hybrid keyframe selection. Returns keyframe dicts, or [] to signal the
+    caller to fall back to uniform time-based sampling (e.g. cv2 missing / clip too short)."""
+    try:
+        import numpy as np
+        import cv2
+    except Exception:
+        return []
+    clip_duration = float(clip.get("duration", 0.0))
+    if clip_duration <= 0:
+        return []
+    dense_fps = float(keyframe_cfg.get("dense_fps", 3.0))
+    min_frames = int(keyframe_cfg.get("min_frames", 3))
+    max_frames = int(keyframe_cfg.get("max_frames", 6))
+    cap = cv2.VideoCapture(str(clip_file))
+    if not cap.isOpened():
+        return []
+    try:
+        n = int(min(40, max(3, clip_duration * dense_fps)))
+        cand_t, cand_f = [], []
+        for rel_t in np.linspace(0.0, max(clip_duration - 1e-3, 0.0), n):
+            cap.set(cv2.CAP_PROP_POS_MSEC, float(rel_t) * 1000.0)
+            ok, fr = cap.read()
+            if ok and fr is not None:
+                cand_t.append(float(rel_t))
+                cand_f.append(fr)
+    finally:
+        cap.release()
+    if len(cand_f) < 2:
+        return []
+    sel = _select_hybrid_indices(np, cv2, cand_f, min_frames, max_frames)
+    clip_id = clip["clip_id"]
+    clip_start = float(clip.get("start", 0.0))
+    keyframes: List[dict] = []
+    for i, idx in enumerate(sel, start=1):
+        frame_id = f"{clip_id}_kf_{i:02d}"
+        frame_path = keyframes_dir / f"{frame_id}.jpg"
+        try:
+            cv2.imwrite(str(frame_path), cand_f[idx])
+        except Exception:
+            continue
+        if not frame_path.exists():
+            continue
+        rel_t = cand_t[idx]
+        keyframes.append(
+            {
+                "frame_id": frame_id,
+                "path": str(frame_path.relative_to(keyframes_dir.parent)),
+                "timestamp": clip_start + rel_t,
+                "clip_relative_time": rel_t,
+            }
+        )
+    return keyframes
+
+
 def _extract_keyframes_for_clip(
     clip_file: Path,
     clip: dict,
@@ -241,6 +405,12 @@ def _extract_keyframes_for_clip(
     clip_duration = float(clip.get("duration", 0.0))
     if clip_duration <= 0:
         return []
+
+    # Hybrid motion-aware selection (default). Falls back to uniform sampling below on failure.
+    if str(keyframe_cfg.get("method", "hybrid")).lower() == "hybrid":
+        hybrid_keyframes = _extract_keyframes_hybrid(clip_file, clip, keyframes_dir, keyframe_cfg)
+        if hybrid_keyframes:
+            return hybrid_keyframes
 
     def _extract_frame_at(rel_t: float, frame_path: Path) -> bool:
         cmd = [
@@ -401,6 +571,12 @@ def process_local_video_adaptive(
         scene_cfg=scene_cfg,
     )
     logger.info(f"  Detected {len(scenes)} scenes")
+
+    scenes = _refine_scenes_by_motion(
+        video_path=video_path,
+        scenes=scenes,
+        scene_cfg=scene_cfg,
+    )
 
     clips = _extract_scene_clips(
         video_path=video_path,

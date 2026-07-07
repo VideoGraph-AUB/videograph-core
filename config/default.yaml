@@ -14,6 +14,12 @@ video_ingestion:
     window_width: 2
     show_progress: false
     min_scene_duration_s: 0.05
+    # Event refinement: cut detection misses static-camera video (no cuts -> one giant
+    # scene, one caption, internal events lost). Split scenes longer than this at motion
+    # minima (pauses), using the same motion signal as hybrid keyframes. 0 disables.
+    max_event_duration_s: 8.0
+    event_target_duration_s: 7.0
+    event_dense_fps: 3.0
   clip_extraction:
     video_codec: "libx264"
     audio_codec: "aac"
