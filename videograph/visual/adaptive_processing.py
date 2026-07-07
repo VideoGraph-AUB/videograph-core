@@ -201,8 +201,29 @@ def update_adaptive_visual_json_with_ocr(
 
     ocr = VisionOCR(model=model)
 
+    # OCR gating: the captioner already looked at each clip's frames and flagged `has_text`.
+    # Only OCR clips with readable text -> skip the (costly) OCR call on plain scenes.
+    # Default True for any clip whose flag is missing, so we never silently drop text.
+    has_text_by_clip: Dict[str, bool] = {}
+    visual_path0 = video_dir / "visual.json"
+    if visual_path0.exists():
+        try:
+            with open(visual_path0, "r", encoding="utf-8") as f:
+                _vis0 = json.load(f)
+            for row in _vis0.get("analyses", []):
+                cid = str(row.get("clip_id", "") or "").strip()
+                if cid:
+                    has_text_by_clip[cid] = bool(row.get("has_text", True))
+        except Exception:
+            has_text_by_clip = {}
+
     ocr_tasks = []
+    skipped_no_text = 0
     for clip in clips:
+        cid = str(clip.get("clip_id", "") or "").strip()
+        if has_text_by_clip and not has_text_by_clip.get(cid, True):
+            skipped_no_text += 1
+            continue
         ocr_tasks.append(
             {
                 "clip_id": clip.get("clip_id"),

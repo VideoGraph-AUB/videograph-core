@@ -32,6 +32,7 @@ class TemporalVisualAnalysis:
     detected_entities: List[str]
     scene_type: str
     keyframes_analyzed: List[str]
+    has_text: bool = False  # captioner's flag: are there readable words on screen worth OCR?
     ocr_text: Optional[str] = None
 
 
@@ -78,6 +79,14 @@ class TemporalVisualCaptioner:
         with open(image_path, "rb") as f:
             return base64.standard_b64encode(f.read()).decode("utf-8")
 
+    def _hash_file(self, path: Path) -> str:
+        import hashlib
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
     def _get_image_media_type(self, path: Path) -> str:
         suffix = path.suffix.lower()
         return {
@@ -108,10 +117,12 @@ class TemporalVisualCaptioner:
                 '  "visual_description": "One short factual sentence about the CURRENT clip with concrete subject-action-object detail",\n'
                 '  "state_change_from_previous": "One short sentence with meaningful change vs previous clip, or empty string",\n'
                 '  "detected_entities": ["flat list of salient entities, including explicit counts when clear (e.g., 2 men, 1 red bus)"],\n'
-                f'  "scene_type": "{scene_types}"\n'
+                f'  "scene_type": "{scene_types}",\n'
+                '  "has_text": true or false (true ONLY if readable on-screen text worth extracting is present)\n'
                 "}\n\n"
                 f"{previous_context}"
                 "Rules:\n"
+                "- has_text must be true only when clearly readable words/numbers/logos appear on screen; false otherwise.\n"
                 "- visual_description must be about the current clip only.\n"
                 "- state_change_from_previous must be empty string if there is no clear meaningful change.\n"
                 "- Do not use minor camera shifts or tiny pose changes as state change.\n"
@@ -136,10 +147,12 @@ class TemporalVisualCaptioner:
             '  "visual_description": "3-6 factual sentences about the CURRENT clip with concrete actor/action/object details, scene context, and visible text. Including important actions and within-clip changes if any",\n'
             '  "state_change_from_previous": "Short factual summary of meaningful visual change vs previous clip, or empty string",\n'
             '  "detected_entities": ["flat list of salient entities, objects, people, logos, and readable text fragments; include explicit counted items when clear"],\n'
-            f'  "scene_type": "{scene_types}"\n'
+            f'  "scene_type": "{scene_types}",\n'
+            '  "has_text": true or false (true ONLY if readable on-screen text is present worth extracting: signs, captions, labels, UI, scoreboards, documents)\n'
             "}\n\n"
             f"{previous_context}"
             "Rules:\n"
+            "- has_text must be true only when clearly readable words/numbers/logos appear on screen; false for plain scenes with no meaningful text.\n"
             "- visual_description must describe only the current clip.\n"
             "- visual_description must prioritize discriminative evidence for retrieval: who/what does what, salient objects, and scene context.\n"
             "- If the current clip frames show temporal progression or an action unfolding within the clip, include that progression in visual_description.\n"
@@ -183,8 +196,8 @@ class TemporalVisualCaptioner:
         if previous_reference_frame is not None and Path(previous_reference_frame).exists():
             prev_ref = Path(previous_reference_frame)
 
-        # Keep at most 5 images total per request. Reserve 1 slot for previous reference.
-        current_limit = 4 if prev_ref else 5
+        # Hybrid keyframes: allow up to 6 current frames (+1 previous reference = 7 images max).
+        current_limit = 6
         current_paths = valid_paths[:current_limit]
         if not current_paths:
             raise ValueError(f"No current clip frames selected for clip {clip_id}")
@@ -212,18 +225,21 @@ class TemporalVisualCaptioner:
                     "type": "image_url",
                     "image_url": {
                         "url": f"data:{media_type};base64,{base64_image}",
-                        "detail": "low",
+                        "detail": "high",
                     },
                 }
             )
 
-        params = {"temperature": self.temperature, "max_tokens": self.max_tokens}
+        params = {"temperature": self.temperature, "max_tokens": self.max_tokens, "seed": 0}
         messages = [{"role": "user", "content": content}]
 
+        # Content-addressed cache key: hash the frame PIXELS, not their paths. Identical
+        # frames then reuse the cached caption across output dirs / rebuilds, making graph
+        # builds deterministic (gpt-4o vision is nondeterministic even at temperature 0,
+        # so re-captioning unchanged clips injects ±several answer flips per rebuild).
         cache_key = {
-            "clip_id": clip_id,
-            "current_frames": [str(p) for p in current_paths],
-            "previous_reference_frame": str(prev_ref) if prev_ref else None,
+            "current_frames": [self._hash_file(p) for p in current_paths],
+            "previous_reference_frame": self._hash_file(prev_ref) if prev_ref else None,
             "prompt_style": self.prompt_style,
             "state_change_enabled": True,
         }
@@ -302,6 +318,8 @@ class TemporalVisualCaptioner:
         if scene_type not in self.SCENE_TYPES:
             scene_type = "other"
 
+        has_text = bool(data.get("has_text", False))
+
         return TemporalVisualAnalysis(
             clip_id=clip_id,
             start=start,
@@ -311,6 +329,7 @@ class TemporalVisualCaptioner:
             detected_entities=detected_entities,
             scene_type=scene_type,
             keyframes_analyzed=[Path(p).name for p in current_frame_paths],
+            has_text=has_text,
         )
 
 
