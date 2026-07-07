@@ -1,8 +1,11 @@
 # VideoGraph Configuration
 
 openai:
-  text_model: "gpt-4o"
-  vision_model: "gpt-4o"
+  # Pinned snapshot (not the floating "gpt-4o" alias) for reproducibility. This is the
+  # exact snapshot the alias resolves to and that all our results were measured on;
+  # verified empirically that 2024-11-20 ("latest") regresses our task (-4 pts on dev).
+  text_model: "gpt-4o-2024-08-06"
+  vision_model: "gpt-4o-2024-08-06"
   transcription_model: "whisper-1"
   embedding_model: "text-embedding-3-small"
   temperature: 0.0

@@ -218,12 +218,101 @@ class GraphBuilder:
         Returns:
             Tuple of (topic_nodes, discourse_edges)
         """
-        # Prepare transcript text with IDs
+        # Windowed analysis: never pass more than WINDOW sentences per call (a flat
+        # single pass is unbounded on long transcripts). Short transcripts = one call
+        # with the original prompt (cache-key stable).
+        WINDOW = 40
+        all_topics_data: List[dict] = []
+        all_relations_data: List[dict] = []
+        for wi in range(0, len(transcript_nodes), WINDOW):
+            window_nodes = transcript_nodes[wi:wi + WINDOW]
+            data = self._analyze_discourse_window(window_nodes)
+            for t in data.get("topics", []):
+                if len(transcript_nodes) > WINDOW:
+                    t["id"] = f"w{wi // WINDOW}_{t.get('id', 'topic')}"
+                all_topics_data.append(t)
+            all_relations_data.extend(data.get("discourse_relations", []))
+        data = {"topics": all_topics_data, "discourse_relations": all_relations_data}
+
+        # Create topic nodes
+        topics = []
+        node_to_topic = {}
+
+        for topic_data in data.get("topics", []):
+            # Find time range from member segments
+            member_ids = topic_data.get("member_segments", [])
+            member_nodes = [n for n in transcript_nodes if n.id in member_ids]
+
+            if not member_nodes:
+                continue
+
+            start = min(n.start for n in member_nodes)
+            end = max(n.end for n in member_nodes)
+
+            schema_str = topic_data.get("schema", "informative")
+            try:
+                schema = DiscourseSchema(schema_str.lower())
+            except ValueError:
+                schema = DiscourseSchema.INFORMATIVE
+
+            topic = TopicNode(
+                id=topic_data.get("id", f"topic_{len(topics)}"),
+                node_type=NodeType.TOPIC,
+                start=start,
+                end=end,
+                title=topic_data.get("title", ""),
+                description=topic_data.get("description"),
+                schema=schema,
+                keywords=topic_data.get("keywords", []),
+                member_nodes=member_ids
+            )
+            topics.append(topic)
+
+            # Update transcript nodes with topic_id and schema
+            for node in member_nodes:
+                node.topic_id = topic.id
+                node.schema = schema
+                node_to_topic[node.id] = topic.id
+
+        # Create discourse edges
+        edges = []
+        valid_relations = {r.value for r in DiscourseRelation}
+
+        for rel_data in data.get("discourse_relations", []):
+            source = rel_data.get("source")
+            target = rel_data.get("target")
+            relation_str = rel_data.get("relation", "").upper()
+
+            if source and target and relation_str in valid_relations:
+                edge = Edge(
+                    id=f"disc_{len(edges):04d}",
+                    source=source,
+                    target=target,
+                    edge_type=EdgeType.DISCOURSE_RELATION,
+                    relation=DiscourseRelation(relation_str)
+                )
+                edges.append(edge)
+
+        # Add BELONGS_TO_TOPIC edges
+        for node_id, topic_id in node_to_topic.items():
+            edge = Edge(
+                id=f"topic_edge_{len(edges):04d}",
+                source=node_id,
+                target=topic_id,
+                edge_type=EdgeType.BELONGS_TO_TOPIC
+            )
+            edges.append(edge)
+
+        logger.info(f"Analyzed {len(topics)} topics, {len(edges)} discourse edges")
+        return topics, edges
+
+    def _analyze_discourse_window(self, transcript_nodes: List[TranscriptNode]) -> dict:
+        """One bounded discourse-analysis call over a window of transcript sentences."""
         text_with_ids = "\n".join([
             f"[{node.id}] {node.text}"
             for node in transcript_nodes
         ])
-        
+
         prompt = f"""Analyze the following transcript and identify:
 1. Topic segments (groups of related sentences)
 2. The discourse schema of each topic (narrative, descriptive, informative, instructional, argumentative)
@@ -256,7 +345,7 @@ Return a JSON object with:
 Be conservative with discourse relations - only include clear, strong relations."""
 
         messages = [{"role": "user", "content": prompt}]
-        params = {"temperature": self.temperature, "max_tokens": 16384}
+        params = {"temperature": self.temperature, "max_tokens": 16384, "seed": 0}
         
         # Check cache
         if self.cache:
@@ -282,83 +371,11 @@ Be conservative with discourse relations - only include clear, strong relations.
             response_text = response.choices[0].message.content
         
         try:
-            data = json.loads(response_text)
+            return json.loads(response_text)
         except json.JSONDecodeError:
-            logger.warning("Failed to parse discourse analysis")
-            return [], []
-        
-        # Create topic nodes
-        topics = []
-        node_to_topic = {}
-        
-        for topic_data in data.get("topics", []):
-            # Find time range from member segments
-            member_ids = topic_data.get("member_segments", [])
-            member_nodes = [n for n in transcript_nodes if n.id in member_ids]
-            
-            if not member_nodes:
-                continue
-            
-            start = min(n.start for n in member_nodes)
-            end = max(n.end for n in member_nodes)
-            
-            schema_str = topic_data.get("schema", "informative")
-            try:
-                schema = DiscourseSchema(schema_str.lower())
-            except ValueError:
-                schema = DiscourseSchema.INFORMATIVE
-            
-            topic = TopicNode(
-                id=topic_data.get("id", f"topic_{len(topics)}"),
-                node_type=NodeType.TOPIC,
-                start=start,
-                end=end,
-                title=topic_data.get("title", ""),
-                description=topic_data.get("description"),
-                schema=schema,
-                keywords=topic_data.get("keywords", []),
-                member_nodes=member_ids
-            )
-            topics.append(topic)
-            
-            # Update transcript nodes with topic_id and schema
-            for node in member_nodes:
-                node.topic_id = topic.id
-                node.schema = schema
-                node_to_topic[node.id] = topic.id
-        
-        # Create discourse edges
-        edges = []
-        valid_relations = {r.value for r in DiscourseRelation}
-        
-        for rel_data in data.get("discourse_relations", []):
-            source = rel_data.get("source")
-            target = rel_data.get("target")
-            relation_str = rel_data.get("relation", "").upper()
-            
-            if source and target and relation_str in valid_relations:
-                edge = Edge(
-                    id=f"disc_{len(edges):04d}",
-                    source=source,
-                    target=target,
-                    edge_type=EdgeType.DISCOURSE_RELATION,
-                    relation=DiscourseRelation(relation_str)
-                )
-                edges.append(edge)
-        
-        # Add BELONGS_TO_TOPIC edges
-        for node_id, topic_id in node_to_topic.items():
-            edge = Edge(
-                id=f"topic_edge_{len(edges):04d}",
-                source=node_id,
-                target=topic_id,
-                edge_type=EdgeType.BELONGS_TO_TOPIC
-            )
-            edges.append(edge)
-        
-        logger.info(f"Analyzed {len(topics)} topics, {len(edges)} discourse edges")
-        return topics, edges
-    
+            logger.warning("Failed to parse discourse analysis window")
+            return {}
+
     def _create_visual_nodes(self, video_dir: Path) -> List[VisualNode]:
         """Create visual nodes from visual.json."""
         visual_path = video_dir / "visual.json"
@@ -477,15 +494,14 @@ Be conservative with discourse relations - only include clear, strong relations.
                     node_text_parts.append(node.ocr_text)
                 node_texts[node.id] = " ".join(node_text_parts)
 
-        structured_context = "\n\n".join(context_blocks)
-        
-        prompt = f"""Extract named entities from the structured video context below. The context contains transcript snippets and visual observations from the same video. For each entity, provide:
+        def _extract_window(window_context: str) -> list:
+            prompt = f"""Extract named entities from the structured video context below. The context contains transcript snippets and visual observations from the same video. For each entity, provide:
 - Canonical name (shortest common form)
 - Entity type (person, organization, product, concept, location, event, other)
 - Aliases (other forms used in the text)
 
 Context:
-{structured_context[:10000]}
+{window_context}
 
 Return JSON:
 {{
@@ -500,43 +516,57 @@ Return JSON:
 
 Be conservative - only extract clear named entities. Prefer shorter canonical names.
 Use transcript text, visual descriptions, detected entities, and OCR text as evidence."""
-
-        messages = [{"role": "user", "content": prompt}]
-        params = {"temperature": self.temperature, "max_tokens": 4096}
-        
-        if self.cache:
-            cached = self.cache.get(self.text_model, messages, params)
-            if cached:
-                response_text = cached.get("text", "{}")
-            else:
+            messages = [{"role": "user", "content": prompt}]
+            params = {"temperature": self.temperature, "max_tokens": 4096, "seed": 0}
+            response_text = None
+            if self.cache:
+                cached = self.cache.get(self.text_model, messages, params)
+                if cached:
+                    response_text = cached.get("text", "{}")
+            if response_text is None:
                 response = self.client.chat.completions.create(
-                    model=self.text_model,
-                    messages=messages,
-                    **params,
+                    model=self.text_model, messages=messages, **params,
                     response_format={"type": "json_object"}
                 )
                 response_text = response.choices[0].message.content
-                self.cache.set(self.text_model, messages, params, {"text": response_text})
-        else:
-            response = self.client.chat.completions.create(
-                model=self.text_model,
-                messages=messages,
-                **params,
-                response_format={"type": "json_object"}
-            )
-            response_text = response.choices[0].message.content
-        
-        try:
-            data = json.loads(response_text)
-        except json.JSONDecodeError:
-            logger.warning("Failed to parse entity extraction")
-            return [], []
-        
+                if self.cache:
+                    self.cache.set(self.text_model, messages, params, {"text": response_text})
+            try:
+                return json.loads(response_text).get("entities", [])
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse entity extraction window")
+                return []
+
+        # Windowed extraction: never pass more than ~10k chars of context per call (a flat
+        # single capped call silently ignored everything beyond the cap on long videos).
+        # Windows are merged by casefold canonical name, unioning aliases.
+        windows, cur, cur_len = [], [], 0
+        for block in context_blocks:
+            if cur and cur_len + len(block) > 10000:
+                windows.append("\n\n".join(cur)); cur, cur_len = [], 0
+            cur.append(block); cur_len += len(block) + 2
+        if cur:
+            windows.append("\n\n".join(cur))
+
+        merged: Dict[str, dict] = {}
+        for w in windows:
+            for ent in _extract_window(w):
+                name = (ent.get("name") or "").strip()
+                if not name:
+                    continue
+                key = name.lower()
+                if key in merged:
+                    merged[key]["aliases"] = list({*merged[key].get("aliases", []),
+                                                   *(ent.get("aliases") or [])})
+                else:
+                    merged[key] = {"name": name, "type": ent.get("type", "other"),
+                                   "aliases": ent.get("aliases", []) or []}
+
         # Create entity nodes
         entity_nodes = []
         entity_edges = []
-        
-        for entity_data in data.get("entities", []):
+
+        for entity_data in merged.values():
             name = entity_data.get("name", "")
             if not name:
                 continue
@@ -775,7 +805,10 @@ def compute_graph_embeddings(
                 cache_key
             )
             if cached:
-                return {"node_id": node_id, "embedding": cached.get("embedding", [])}
+                emb = cached.get("embedding", [])
+                # Discard corrupt cached embeddings (historic truncated writes)
+                if len(emb) in (1536, 3072):
+                    return {"node_id": node_id, "embedding": emb}
         
         try:
             response = client.embeddings.create(

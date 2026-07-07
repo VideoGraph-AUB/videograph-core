@@ -134,7 +134,13 @@ class GraphRetriever:
                 cache_key
             )
             if cached:
-                return np.array(cached.get("embedding", []))
+                emb = np.array(cached.get("embedding", []))
+                # Validate cached dimensionality: a historic truncated write (e.g. 1534
+                # of 1536 dims) would otherwise be replayed forever and crash retrieval.
+                expected = {"text-embedding-3-small": 1536, "text-embedding-3-large": 3072}.get(self.embedding_model)
+                if expected is None or emb.shape == (expected,):
+                    return emb
+                logger.warning(f"Discarding corrupt cached embedding ({emb.shape[0]} dims, expected {expected})")
         
         response = self.client.embeddings.create(
             model=self.embedding_model,
