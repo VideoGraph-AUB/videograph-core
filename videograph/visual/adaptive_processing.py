@@ -232,6 +232,8 @@ def update_adaptive_visual_json_with_ocr(
                 "frame_paths": _clip_keyframe_paths(video_dir, clip),
             }
         )
+    if skipped_no_text:
+        logger.info(f"  OCR gating: skipped {skipped_no_text}/{len(clips)} clips flagged as having no readable text")
 
     def process_ocr_task(task):
         texts: List[str] = []
