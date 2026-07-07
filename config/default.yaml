@@ -36,6 +36,12 @@ video_ingestion:
 transcription:
   language: null
   timestamp_granularity: "segment"
+  # Drop Whisper no-speech hallucinations (text invented over music/silence) using the
+  # per-segment signals in verbose_json. Thresholds mirror faster-whisper defaults.
+  filter_hallucinations: true
+  no_speech_threshold: 0.6
+  logprob_threshold: -1.0
+  compression_ratio_threshold: 2.4
 
 visual:
   ocr_enabled: true

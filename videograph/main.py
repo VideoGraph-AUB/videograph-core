@@ -90,7 +90,11 @@ def cmd_build(args):
         output_dir=str(output_dir),
         model=config.get("openai", {}).get("transcription_model", "whisper-1"),
         language=trans_config.get("language"),
-        timestamp_granularity=trans_config.get("timestamp_granularity", "segment")
+        timestamp_granularity=trans_config.get("timestamp_granularity", "segment"),
+        filter_hallucinations=trans_config.get("filter_hallucinations", True),
+        no_speech_threshold=trans_config.get("no_speech_threshold", 0.6),
+        logprob_threshold=trans_config.get("logprob_threshold", -1.0),
+        compression_ratio_threshold=trans_config.get("compression_ratio_threshold", 2.4)
     )
     
     # Step 3: Adaptive visual captioning

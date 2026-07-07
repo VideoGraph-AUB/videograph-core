@@ -52,28 +52,44 @@ class Transcriber:
         model: str = "whisper-1",
         language: Optional[str] = None,
         timestamp_granularity: str = "segment",
-        cache_enabled: bool = True
+        cache_enabled: bool = True,
+        filter_hallucinations: bool = True,
+        no_speech_threshold: float = 0.6,
+        logprob_threshold: float = -1.0,
+        compression_ratio_threshold: float = 2.4
     ):
         """
         Initialize the transcriber.
-        
+
         Args:
             api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
             model: Whisper model name
             language: Language code (None for auto-detect)
             timestamp_granularity: "word" or "segment"
             cache_enabled: Whether to cache API calls
+            filter_hallucinations: Drop low-confidence/no-speech segments (Whisper
+                hallucinates text on music/silence; verbose_json exposes the signals)
+            no_speech_threshold: Drop a segment when no_speech_prob exceeds this and the
+                segment is also low-confidence (avg_logprob < logprob_threshold + 0.5),
+                or unconditionally when no_speech_prob > 0.9
+            logprob_threshold: Drop a segment when avg_logprob is below this (gibberish)
+            compression_ratio_threshold: Drop a segment when compression_ratio exceeds
+                this (degenerate repetition loop)
         """
         if api_key is None:
             api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY not found")
-        
+
         self.client = OpenAI(api_key=api_key)
         self.model = model
         self.language = language
         self.timestamp_granularity = timestamp_granularity
         self.cache = get_cache() if cache_enabled else None
+        self.filter_hallucinations = filter_hallucinations
+        self.no_speech_threshold = no_speech_threshold
+        self.logprob_threshold = logprob_threshold
+        self.compression_ratio_threshold = compression_ratio_threshold
     
     def transcribe(self, audio_path: Path) -> Transcript:
         """
@@ -353,33 +369,76 @@ class Transcriber:
                 hasher.update(chunk)
         return hasher.hexdigest()
     
+    def _is_hallucination(self, seg: dict) -> bool:
+        """
+        Decide whether a verbose_json segment is a no-speech hallucination.
+
+        Whisper invents text over music/silence; the per-segment signals it returns
+        (no_speech_prob, avg_logprob, compression_ratio) separate this from real speech.
+        """
+        no_speech_prob = seg.get("no_speech_prob")
+        avg_logprob = seg.get("avg_logprob")
+        compression_ratio = seg.get("compression_ratio")
+
+        # Very low decoder confidence => gibberish (e.g. avg_logprob -3.2 on pure music).
+        if avg_logprob is not None and avg_logprob < self.logprob_threshold:
+            return True
+        # Near-certain "no speech here" (e.g. an invented lyric over an instrumental outro).
+        if no_speech_prob is not None and no_speech_prob > 0.9:
+            return True
+        # Standard combined no-speech condition: probably silence and not confident.
+        if (
+            no_speech_prob is not None and avg_logprob is not None
+            and no_speech_prob > self.no_speech_threshold
+            and avg_logprob < self.logprob_threshold + 0.5
+        ):
+            return True
+        # Degenerate repetition loop.
+        if compression_ratio is not None and compression_ratio > self.compression_ratio_threshold:
+            return True
+        return False
+
     def _parse_response(self, response: dict) -> Transcript:
         """Parse Whisper API response into Transcript object."""
+        raw_segments = response.get("segments", []) or []
+
+        kept_raw = raw_segments
+        if self.filter_hallucinations and raw_segments:
+            kept_raw = [s for s in raw_segments if not self._is_hallucination(s)]
+            dropped = len(raw_segments) - len(kept_raw)
+            if dropped:
+                logger.info(
+                    f"Filtered {dropped}/{len(raw_segments)} hallucinated/no-speech "
+                    f"segment(s) from transcript"
+                )
+
         segments = []
-        
-        for i, seg in enumerate(response.get("segments", [])):
-            segment = TranscriptSegment(
+        for i, seg in enumerate(kept_raw):
+            segments.append(TranscriptSegment(
                 id=i,
                 text=seg.get("text", "").strip(),
                 start=seg.get("start", 0),
                 end=seg.get("end", 0),
                 words=seg.get("words")
-            )
-            segments.append(segment)
-        
-        # If no segments but we have text, create a single segment
-        if not segments and response.get("text"):
-            segments.append(TranscriptSegment(
-                id=0,
-                text=response["text"].strip(),
-                start=0,
-                end=response.get("duration", 0),
-                words=None
             ))
-        
+
+        # Rebuild full_text from the kept segments so it never carries dropped text.
+        if self.filter_hallucinations and raw_segments:
+            full_text = " ".join(s.text for s in segments if s.text).strip()
+        else:
+            full_text = response.get("text", "").strip()
+
+        # If no segments but we have text (no segment-level signals to filter on), keep it.
+        if not segments and not raw_segments and response.get("text"):
+            text = response["text"].strip()
+            segments.append(TranscriptSegment(
+                id=0, text=text, start=0, end=response.get("duration", 0), words=None
+            ))
+            full_text = text
+
         return Transcript(
             segments=segments,
-            full_text=response.get("text", "").strip(),
+            full_text=full_text,
             language=response.get("language", "unknown"),
             duration=response.get("duration", 0)
         )
@@ -460,28 +519,40 @@ def transcribe_audio(
     output_dir: Optional[str] = None,
     model: str = "whisper-1",
     language: Optional[str] = None,
-    timestamp_granularity: str = "segment"
+    timestamp_granularity: str = "segment",
+    filter_hallucinations: bool = True,
+    no_speech_threshold: float = 0.6,
+    logprob_threshold: float = -1.0,
+    compression_ratio_threshold: float = 2.4
 ) -> dict:
     """
     Convenience function to transcribe audio and save results.
-    
+
     Args:
         audio_path: Path to audio file
         output_dir: Directory to save transcript (defaults to same as audio)
         model: Whisper model name
         language: Language code (None for auto-detect)
         timestamp_granularity: "word" or "segment"
-        
+        filter_hallucinations: Drop low-confidence/no-speech (hallucinated) segments
+        no_speech_threshold: no_speech_prob cutoff for the combined no-speech condition
+        logprob_threshold: avg_logprob cutoff below which a segment is dropped
+        compression_ratio_threshold: compression_ratio cutoff for repetition loops
+
     Returns:
         Dictionary with transcript data
     """
     audio_path = Path(audio_path)
     output_dir = Path(output_dir) if output_dir else audio_path.parent
-    
+
     transcriber = Transcriber(
         model=model,
         language=language,
-        timestamp_granularity=timestamp_granularity
+        timestamp_granularity=timestamp_granularity,
+        filter_hallucinations=filter_hallucinations,
+        no_speech_threshold=no_speech_threshold,
+        logprob_threshold=logprob_threshold,
+        compression_ratio_threshold=compression_ratio_threshold
     )
     
     transcript = transcriber.transcribe(audio_path)
