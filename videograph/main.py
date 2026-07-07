@@ -123,6 +123,34 @@ def cmd_build(args):
         except Exception as e:
             logger.warning(f"OCR failed (non-fatal): {e}")
     
+    # Step 4b: GRL — graph reinforcement (critique -> targeted re-perception -> gated
+    # write-back). Enriches clip captions before summary synthesis; rebuild deferred.
+    grl_cfg = config.get("graph", {}).get("reinforcement", {})
+    if grl_cfg.get("enabled", False):
+        from .graph.reinforce import reinforce_video_graph
+        try:
+            reinforce_video_graph(
+                str(output_dir),
+                text_model=config.get("openai", {}).get("text_model", "gpt-4o"),
+                vision_model=config.get("openai", {}).get("vision_model", "gpt-4o"),
+                max_probes=int(grl_cfg.get("max_probes", 5)),
+                frames_per_probe=int(grl_cfg.get("frames_per_probe", 8)),
+                rebuild=False,
+            )
+        except Exception as e:
+            logger.warning(f"GRL failed (non-fatal): {e}")
+
+    # Step 4c: Multi-granularity — whole-video summary node (coarse level alongside
+    # event-granular clips; retrieval routes by similarity)
+    from .visual.adaptive_processing import append_video_summary_node
+    try:
+        append_video_summary_node(
+            str(output_dir),
+            model=config.get("openai", {}).get("text_model", "gpt-4o"),
+        )
+    except Exception as e:
+        logger.warning(f"Summary node failed (non-fatal): {e}")
+
     # Step 5: Build graph
     logger.info("Step 5/5: Building knowledge graph...")
     graph_data = build_video_graph(str(output_dir), config=config)

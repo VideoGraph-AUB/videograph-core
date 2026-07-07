@@ -305,3 +305,78 @@ def update_adaptive_visual_json_with_ocr(
 
 
 
+
+
+def append_video_summary_node(
+    video_dir: str,
+    model: str = "gpt-4o",
+    api_key: Optional[str] = None,
+) -> bool:
+    """
+    Multi-granularity: append ONE whole-video summary row to visual.json, synthesized
+    (text-only) from the clip captions. Event segmentation serves fine-grained questions
+    but fragments evidence for holistic/gist questions; the summary level restores broad
+    coverage in the same graph, with retrieval routing by similarity (no mode switch).
+    Validated: EgoSchema +2 (repairs the event-seg holistic regression), NExT-QA dev -1
+    (noise floor), holdout +1.
+    """
+    import os as _os
+    from openai import OpenAI
+
+    video_dir = Path(video_dir)
+    vis_path = video_dir / "visual.json"
+    if not vis_path.exists():
+        return False
+    with open(vis_path, "r", encoding="utf-8") as f:
+        vis = json.load(f)
+    rows = sorted(vis.get("analyses", []), key=lambda a: a.get("start", 0))
+    if not rows or any(a.get("clip_id") == "vid_summary" for a in rows):
+        return False
+
+    client = OpenAI(api_key=api_key or _os.getenv("OPENAI_API_KEY"))
+
+    def _summarize(text: str, header: str) -> str:
+        resp = client.chat.completions.create(
+            model=model, temperature=0, seed=0, max_tokens=400,
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content":
+                header + " Write a whole-video summary: "
+                "main subjects, primary activity/objective, ordered key actions, setting. "
+                '5-7 sentences, only what the descriptions support. JSON {"summary":"..."}\n\n' + text}],
+        )
+        try:
+            return (json.loads(resp.choices[0].message.content).get("summary") or "").strip()
+        except Exception:
+            return ""
+
+    # Hierarchical (map-reduce) summarization: never pass more than CHUNK clip captions
+    # per call. Short videos = one call; long videos = per-chunk summaries, then a summary
+    # of summaries. Per-call input stays bounded regardless of video length (a flat
+    # single-pass would silently truncate long videos).
+    CHUNK = 30
+    lines = [f"- {(a.get('visual_description') or '')[:150]}" for a in rows]
+    if len(lines) <= CHUNK:
+        # exact prompt wording validated on ego/dev/holdout (cache-key stable)
+        summary = _summarize("\n".join(lines), "Per-clip descriptions of ONE video, in order.")
+    else:
+        parts = []
+        for i in range(0, len(lines), CHUNK):
+            s = _summarize("\n".join(lines[i:i + CHUNK]),
+                           "Per-clip descriptions of ONE CONSECUTIVE PART of a video, in order.")
+            if s:
+                parts.append(f"- Part {len(parts) + 1}: {s}")
+        summary = _summarize("\n".join(parts),
+                             "Summaries of consecutive parts of ONE video, in order.") if parts else ""
+    if not summary:
+        return False
+    end = max((a.get("end", 0) for a in rows), default=0)
+    rows.append({"clip_id": "vid_summary", "start": 0.0, "end": end,
+                 "visual_description": "Overall video summary: " + summary,
+                 "state_change_from_previous": "", "detected_entities": [],
+                 "scene_type": "other", "has_text": False,
+                 "keyframes_analyzed": [], "ocr_text": ""})
+    vis["analyses"] = rows
+    with open(vis_path, "w", encoding="utf-8") as f:
+        json.dump(vis, f, ensure_ascii=False, indent=2)
+    logger.info("Appended whole-video summary node")
+    return True

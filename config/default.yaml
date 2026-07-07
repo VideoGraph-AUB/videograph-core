@@ -1,9 +1,4 @@
-# VideoGraph Configuration
-
 openai:
-  # Pinned snapshot (not the floating "gpt-4o" alias) for reproducibility. This is the
-  # exact snapshot the alias resolves to and that all our results were measured on;
-  # verified empirically that 2024-11-20 ("latest") regresses our task (-4 pts on dev).
   text_model: "gpt-4o-2024-08-06"
   vision_model: "gpt-4o-2024-08-06"
   transcription_model: "whisper-1"
@@ -17,9 +12,6 @@ video_ingestion:
     window_width: 2
     show_progress: false
     min_scene_duration_s: 0.05
-    # Event refinement: cut detection misses static-camera video (no cuts -> one giant
-    # scene, one caption, internal events lost). Split scenes longer than this at motion
-    # minima (pauses), using the same motion signal as hybrid keyframes. 0 disables.
     max_event_duration_s: 8.0
     event_target_duration_s: 7.0
     event_dense_fps: 3.0
@@ -39,8 +31,6 @@ video_ingestion:
 transcription:
   language: null
   timestamp_granularity: "segment"
-  # Drop Whisper no-speech hallucinations (text invented over music/silence) using the
-  # per-segment signals in verbose_json. Thresholds mirror faster-whisper defaults.
   filter_hallucinations: true
   no_speech_threshold: 0.6
   logprob_threshold: -1.0
@@ -52,7 +42,11 @@ visual:
   append_state_change_to_description: false
 
 graph:
-  temperature: 0.3
+  temperature: 0.0
+  reinforcement:
+    enabled: true
+    max_probes: 5
+    frames_per_probe: 8
   temporal_window: 5
   build_topic_nodes: true
   build_entity_nodes: true
