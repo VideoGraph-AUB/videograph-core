@@ -14,11 +14,10 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from openai import OpenAI
-
 from ..graph.models import MultimodalGraph, NodeType
 from ..retrieval.graph_retrieval import GraphRetriever, RetrievalResult
 from ..cache.openai_cache import get_cache
+from ..utils import get_openai_client, resolve_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +79,8 @@ class QuestionAnswerer:
             expansion_edge_types: Optional edge-type override for expansion
             cache_enabled: Whether to cache API calls
         """
-        if api_key is None:
-            api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY not found")
-        
-        self.client = OpenAI(api_key=api_key)
-        self.text_model = text_model
+        self.client = get_openai_client(api_key)
+        self.text_model = resolve_model_name(text_model, "chat")
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_evidence = max_evidence

@@ -16,14 +16,12 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import asdict
 import uuid
 
-from openai import OpenAI
-
 from .models import (
     MultimodalGraph, TranscriptNode, VisualNode, EntityNode, TopicNode,
     Edge, EdgeType, DiscourseRelation, DiscourseSchema, NodeType
 )
 from ..cache.openai_cache import get_cache
-from ..utils import get_node_text_for_embedding
+from ..utils import get_node_text_for_embedding, get_openai_client, resolve_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -55,14 +53,9 @@ class GraphBuilder:
             build_entities: Whether to build entity nodes
             cache_enabled: Whether to cache API calls
         """
-        if api_key is None:
-            api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY not found")
-        
-        self.client = OpenAI(api_key=api_key)
-        self.text_model = text_model
-        self.embedding_model = embedding_model
+        self.client = get_openai_client(api_key)
+        self.text_model = resolve_model_name(text_model, "chat")
+        self.embedding_model = resolve_model_name(embedding_model, "embedding")
         self.temperature = temperature
         self.temporal_window = temporal_window
         self.build_topics = build_topics
@@ -766,16 +759,11 @@ def compute_graph_embeddings(
         progress_callback: Optional callback for progress updates
     """
     import os
-    from openai import OpenAI
     from ..processing.parallel import ParallelProcessor
     from ..cache.openai_cache import get_cache
-    
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        logger.warning("OPENAI_API_KEY not found, skipping embedding computation")
-        return
-    
-    client = OpenAI(api_key=api_key)
+
+    embedding_model = resolve_model_name(embedding_model, "embedding")
+    client = get_openai_client()
     cache = get_cache()
     
     # Collect texts to embed using standardized function

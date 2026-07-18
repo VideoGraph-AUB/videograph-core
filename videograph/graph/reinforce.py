@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from openai import OpenAI
+from ..utils import get_openai_client, resolve_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,9 @@ def reinforce_video_graph(
         logger.warning(f"reinforce: no visual.json in {video_dir}")
         return 0
 
-    client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+    client = get_openai_client(api_key)
+    text_model = resolve_model_name(text_model, "chat")
+    vision_model = resolve_model_name(vision_model, "vision")
     vis = json.loads(vis_path.read_text(encoding="utf-8"))
     all_rows = sorted(vis.get("analyses", []), key=lambda a: a.get("start", 0))
     # Exclude synthetic rows (e.g. vid_summary): they have no clip file to re-perceive.

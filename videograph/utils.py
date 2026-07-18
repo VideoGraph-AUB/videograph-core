@@ -14,6 +14,9 @@ except ImportError:
 from openai import OpenAI
 
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
 _OCR_FAILURE_PATTERNS = (
     "no text found",
     "no readable text found",
@@ -72,12 +75,66 @@ def timed(func):
     return wrapper
 
 
+def get_api_provider() -> str:
+    """Return the configured OpenAI-compatible API provider."""
+    configured = os.getenv("VIDEOGRAPH_API_PROVIDER", "").strip().lower()
+    if configured:
+        if configured not in {"openai", "openrouter"}:
+            raise RuntimeError(
+                "VIDEOGRAPH_API_PROVIDER must be 'openai' or 'openrouter'"
+            )
+        return configured
+    return "openrouter" if os.getenv("OPENROUTER_API_KEY") else "openai"
+
+
+def get_api_key(api_key: Optional[str] = None) -> str:
+    """Resolve the credential for the configured provider."""
+    if api_key:
+        return api_key
+    provider = get_api_provider()
+    variable = "OPENROUTER_API_KEY" if provider == "openrouter" else "OPENAI_API_KEY"
+    resolved = os.getenv(variable)
+    if not resolved:
+        raise RuntimeError(f"{variable} is required for provider {provider!r}")
+    return resolved
+
+
+def resolve_model_name(model: str, capability: Optional[str] = None) -> str:
+    """Translate existing OpenAI model names to OpenRouter model slugs."""
+    model = str(model or "").strip()
+    if not model:
+        raise ValueError("model name is required")
+
+    provider = get_api_provider()
+    if provider == "openai":
+        return model.removeprefix("openai/")
+    if "/" in model:
+        return model
+    if capability == "transcription" and model == "whisper-1":
+        return os.getenv(
+            "OPENROUTER_TRANSCRIPTION_MODEL", "openai/whisper-1"
+        ).strip()
+    return f"openai/{model}"
+
+
 def get_openai_client(api_key: Optional[str] = None) -> OpenAI:
-    if api_key is None:
-        api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is required")
-    return OpenAI(api_key=api_key)
+    """Create an OpenAI SDK client for OpenAI or OpenRouter."""
+    provider = get_api_provider()
+    kwargs: Dict[str, Any] = {"api_key": get_api_key(api_key)}
+    if provider == "openrouter":
+        kwargs["base_url"] = os.getenv(
+            "OPENROUTER_BASE_URL", OPENROUTER_BASE_URL
+        ).rstrip("/")
+        headers = {}
+        referer = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+        app_name = os.getenv("OPENROUTER_APP_NAME", "VideoGraph").strip()
+        if referer:
+            headers["HTTP-Referer"] = referer
+        if app_name:
+            headers["X-OpenRouter-Title"] = app_name
+        if headers:
+            kwargs["default_headers"] = headers
+    return OpenAI(**kwargs)
 
 
 def log_jsonl(path: Path, record: Dict[str, Any]) -> None:

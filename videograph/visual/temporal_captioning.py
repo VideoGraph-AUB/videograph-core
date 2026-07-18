@@ -12,10 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from openai import OpenAI
-
 from videograph.cache.openai_cache import get_cache
-from videograph.utils import normalize_text, sanitize_entity_strings, sanitize_state_change_text
+from videograph.utils import (
+    get_openai_client,
+    normalize_text,
+    resolve_model_name,
+    sanitize_entity_strings,
+    sanitize_state_change_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +67,8 @@ class TemporalVisualCaptioner:
         max_tokens: int = 1024,
         cache_enabled: bool = True,
     ):
-        if api_key is None:
-            api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY not found")
-
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
+        self.client = get_openai_client(api_key)
+        self.model = resolve_model_name(model, "vision")
         self.prompt_style = prompt_style
         self.temperature = temperature
         self.max_tokens = max_tokens

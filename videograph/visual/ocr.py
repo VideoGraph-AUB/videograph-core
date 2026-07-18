@@ -12,10 +12,8 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from openai import OpenAI
-
 from ..cache.openai_cache import get_cache
-from ..utils import sanitize_ocr_text
+from ..utils import get_openai_client, resolve_model_name, sanitize_ocr_text
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +27,8 @@ class VisionOCR:
         model: str = "gpt-4o",
         cache_enabled: bool = True
     ):
-        if api_key is None:
-            api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY not found")
-        
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
+        self.client = get_openai_client(api_key)
+        self.model = resolve_model_name(model, "vision")
         self.cache = get_cache() if cache_enabled else None
     
     def _encode_image(self, image_path: Path) -> str:

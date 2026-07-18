@@ -322,8 +322,7 @@ def append_video_summary_node(
     Validated: EgoSchema +2 (repairs the event-seg holistic regression), NExT-QA dev -1
     (noise floor), holdout +1.
     """
-    import os as _os
-    from openai import OpenAI
+    from videograph.utils import get_openai_client, resolve_model_name
 
     video_dir = Path(video_dir)
     vis_path = video_dir / "visual.json"
@@ -335,7 +334,8 @@ def append_video_summary_node(
     if not rows or any(a.get("clip_id") == "vid_summary" for a in rows):
         return False
 
-    client = OpenAI(api_key=api_key or _os.getenv("OPENAI_API_KEY"))
+    client = get_openai_client(api_key)
+    model = resolve_model_name(model, "chat")
 
     def _summarize(text: str, header: str) -> str:
         resp = client.chat.completions.create(

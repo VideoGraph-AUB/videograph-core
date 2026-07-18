@@ -14,9 +14,8 @@ import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Optional
-from openai import OpenAI
-
 from ..cache.openai_cache import get_cache
+from ..utils import get_openai_client, resolve_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +61,7 @@ class Transcriber:
         Initialize the transcriber.
 
         Args:
-            api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
+            api_key: Provider API key (defaults to the configured provider's env var)
             model: Whisper model name
             language: Language code (None for auto-detect)
             timestamp_granularity: "word" or "segment"
@@ -76,13 +75,8 @@ class Transcriber:
             compression_ratio_threshold: Drop a segment when compression_ratio exceeds
                 this (degenerate repetition loop)
         """
-        if api_key is None:
-            api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY not found")
-
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
+        self.client = get_openai_client(api_key)
+        self.model = resolve_model_name(model, "transcription")
         self.language = language
         self.timestamp_granularity = timestamp_granularity
         self.cache = get_cache() if cache_enabled else None

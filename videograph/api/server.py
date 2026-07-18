@@ -838,13 +838,12 @@ async def global_search(request: GlobalSearchRequest):
     to find relevant content, then synthesizes an answer.
     """
     import numpy as np
-    from openai import OpenAI
-    
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
-    
-    client = OpenAI(api_key=api_key)
+    from videograph.utils import get_openai_client, resolve_model_name
+
+    try:
+        client = get_openai_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     
     all_results = []
     videos_with_embeddings = 0
@@ -854,7 +853,7 @@ async def global_search(request: GlobalSearchRequest):
     query_embedding = None
     try:
         response = client.embeddings.create(
-            model="text-embedding-3-small",
+            model=resolve_model_name("text-embedding-3-small", "embedding"),
             input=request.query[:8000]
         )
         query_embedding = np.array(response.data[0].embedding)
@@ -969,7 +968,9 @@ async def global_search(request: GlobalSearchRequest):
     try:
         config = load_config()
         openai_config = config.get("openai", {})
-        text_model = openai_config.get("text_model", "gpt-4o")
+        text_model = resolve_model_name(
+            openai_config.get("text_model", "gpt-4o"), "chat"
+        )
         temperature = float(openai_config.get("temperature", 0.3))
         
         answer_response = client.chat.completions.create(

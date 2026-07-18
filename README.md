@@ -5,8 +5,8 @@ Core backend and graph-based video QA engine for VideoGraph.
 This package handles the full pipeline from raw video to queryable knowledge graph:
 
 - Adaptive video ingestion with scene detection and keyframe extraction
-- Audio transcription via OpenAI Whisper
-- Visual captioning and OCR via OpenAI vision models
+- Audio transcription via OpenAI or OpenRouter speech-to-text models
+- Visual captioning and OCR via OpenAI-compatible vision models
 - Multimodal knowledge graph construction (transcript, visual, entity, and topic nodes)
 - Hybrid graph retrieval (semantic + lexical) with hop expansion
 - Question answering over the constructed graph
@@ -19,7 +19,7 @@ This package handles the full pipeline from raw video to queryable knowledge gra
   - Ubuntu/Debian: `sudo apt install ffmpeg`
   - macOS: `brew install ffmpeg`
   - Windows: download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to `PATH`
-- **OpenAI API key** - required for transcription (Whisper), vision captioning (GPT-4o), embeddings, and QA
+- **OpenAI or OpenRouter API key** - required for transcription, vision captioning, embeddings, and QA
 
 ## Install
 
@@ -27,7 +27,7 @@ This package handles the full pipeline from raw video to queryable knowledge gra
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
-cp .env.example .env         # then set OPENAI_API_KEY
+cp .env.example .env         # then configure OpenAI or OpenRouter
 ```
 
 On Windows PowerShell:
@@ -36,8 +36,31 @@ On Windows PowerShell:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e .
-copy .env.example .env       # then set OPENAI_API_KEY
+copy .env.example .env       # then configure OpenAI or OpenRouter
 ```
+
+## API Provider
+
+Direct OpenAI remains the default:
+
+```dotenv
+VIDEOGRAPH_API_PROVIDER=openai
+OPENAI_API_KEY=your_openai_api_key_here
+```
+
+To use OpenRouter through the same OpenAI SDK integration:
+
+```dotenv
+VIDEOGRAPH_API_PROVIDER=openrouter
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_APP_NAME=VideoGraph
+OPENROUTER_TRANSCRIPTION_MODEL=openai/whisper-1
+```
+
+Existing model names in `config/default.yaml` are translated automatically to
+OpenRouter's provider-qualified slugs. If `VIDEOGRAPH_API_PROVIDER` is omitted,
+the presence of `OPENROUTER_API_KEY` selects OpenRouter; otherwise OpenAI is used.
 
 ## CLI
 

@@ -16,14 +16,18 @@ from pathlib import Path
 from typing import Iterable, List, Dict, Optional, Set, Tuple
 import numpy as np
 
-from openai import OpenAI
-
 from ..graph.models import (
     MultimodalGraph, BaseNode,
     NodeType, EdgeType
 )
 from ..cache.openai_cache import get_cache
-from ..utils import get_node_text_for_embedding, get_visual_description_text_for_embedding, get_visual_state_change_text_for_embedding
+from ..utils import (
+    get_node_text_for_embedding,
+    get_openai_client,
+    get_visual_description_text_for_embedding,
+    get_visual_state_change_text_for_embedding,
+    resolve_model_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +71,8 @@ class GraphRetriever:
             cache_enabled: Whether to cache embeddings
             persist_visual_channel_embeddings: Whether to write missing visual sidecar embeddings
         """
-        if api_key is None:
-            api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY not found")
-        
-        self.client = OpenAI(api_key=api_key)
-        self.embedding_model = embedding_model
+        self.client = get_openai_client(api_key)
+        self.embedding_model = resolve_model_name(embedding_model, "embedding")
         self.top_k = top_k
         self.hop_expansion = hop_expansion
         self.hybrid_alpha = hybrid_alpha
